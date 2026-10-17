@@ -29,15 +29,9 @@ class Predictor(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
-            # 1. apply transforms
-            x = # YOUR CODE HERE
-            # 2. get the logits
-            x = # YOUR CODE HERE
-            # 3. apply softmax
-            #    HINT: remember to apply softmax across dim=1
-            x = # YOUR CODE HERE
-
-            return x
+            x = self.transforms(x)
+            logits = self.model(x)
+            return F.softmax(logits, dim=1)
 
 
 def predictor_test(test_dataloader, model_reloaded):
@@ -45,22 +39,30 @@ def predictor_test(test_dataloader, model_reloaded):
     folder = get_data_location()
     test_data = datasets.ImageFolder(os.path.join(folder, "test"), transform=T.ToTensor())
 
-    pred = []
-    truth = []
-    for x in tqdm(test_data, total=len(test_dataloader.dataset), leave=True, ncols=80):
-        softmax = model_reloaded(x[0].unsqueeze(dim=0))
+    test_loader = torch.utils.data.DataLoader(
+        test_data,
+        batch_size=test_dataloader.batch_size or 32,
+        num_workers=test_dataloader.num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+    try:
+        device = next(model_reloaded.parameters()).device
+    except StopIteration:
+        device = torch.device("cpu")
+    predicted, actual = [], []
+    model_reloaded.eval()
+    with torch.inference_mode():
+        for images, labels in tqdm(
+            test_loader, total=len(test_loader), leave=True, ncols=80
+        ):
+            probabilities = model_reloaded(images.to(device, non_blocking=True))
+            predicted.extend(probabilities.argmax(dim=1).cpu().tolist())
+            actual.extend(labels.tolist())
 
-        idx = softmax.squeeze().argmax()
-
-        pred.append(int(x[1]))
-        truth.append(int(idx))
-
-    pred = np.array(pred)
-    truth = np.array(truth)
-
-    print(f"Accuracy: {(pred==truth).sum() / pred.shape[0]}")
-
-    return truth, pred
+    predicted = np.asarray(predicted)
+    actual = np.asarray(actual)
+    print(f"Accuracy: {(predicted == actual).mean():.4f}")
+    return predicted, actual
 
 
 ######################################################################################

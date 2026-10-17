@@ -26,8 +26,14 @@ def get_data_loaders(
     """
 
     if num_workers == -1:
-        # Use all cores
-        num_workers = multiprocessing.cpu_count()
+        # Bound worker count to avoid CPU and memory oversubscription.
+        num_workers = min(8, multiprocessing.cpu_count())
+    elif num_workers < 0:
+        raise ValueError("num_workers must be -1 or a non-negative integer")
+    if batch_size < 1:
+        raise ValueError("batch_size must be a positive integer")
+    if not 0 <= valid_size < 1:
+        raise ValueError("valid_size must be in the range [0, 1)")
 
     # We will fill this up later
     data_loaders = {"train": None, "valid": None, "test": None}
@@ -38,37 +44,45 @@ def get_data_loaders(
     mean, std = compute_mean_and_std()
     print(f"Dataset mean: {mean}, std: {std}")
 
-    # YOUR CODE HERE:
-    # create 3 sets of data transforms: one for the training dataset,
-    # containing data augmentation, one for the validation dataset
-    # (without data augmentation) and one for the test set (again
-    # without augmentation)
-    # HINT: resize the image to 256 first, then crop them to 224, then add the
-    # appropriate transforms for that step
     data_transforms = {
         "train": transforms.Compose(
-            # YOUR CODE HERE
+            [
+                transforms.Resize(256),
+                transforms.RandomCrop(224),
+                transforms.RandomHorizontalFlip(),
+                transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.15),
+                transforms.ToTensor(),
+                transforms.Normalize(mean.tolist(), std.tolist()),
+            ]
         ),
         "valid": transforms.Compose(
-            # YOUR CODE HERE
+            [
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(mean.tolist(), std.tolist()),
+            ]
         ),
         "test": transforms.Compose(
-            # YOUR CODE HERE
+            [
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(mean.tolist(), std.tolist()),
+            ]
         ),
     }
 
     # Create train and validation datasets
     train_data = datasets.ImageFolder(
         base_path / "train",
-        # YOUR CODE HERE: add the appropriate transform that you defined in
-        # the data_transforms dictionary
+        transform=data_transforms["train"],
     )
     # The validation dataset is a split from the train_one_epoch dataset, so we read
     # from the same folder, but we apply the transforms for validation
     valid_data = datasets.ImageFolder(
         base_path / "train",
-        # YOUR CODE HERE: add the appropriate transform that you defined in
-        # the data_transforms dictionary
+        transform=data_transforms["valid"],
     )
 
     # obtain training indices that will be used for validation
@@ -77,41 +91,53 @@ def get_data_loaders(
 
     # If requested, limit the number of data points to consider
     if limit > 0:
-        indices = indices[:limit]
-        n_tot = limit
+        n_tot = min(limit, n_tot)
+        indices = indices[:n_tot]
 
     split = int(math.ceil(valid_size * n_tot))
     train_idx, valid_idx = indices[split:], indices[:split]
 
     # define samplers for obtaining training and validation batches
     train_sampler = torch.utils.data.SubsetRandomSampler(train_idx)
-    valid_sampler = # YOUR CODE HERE
+    valid_sampler = torch.utils.data.SubsetRandomSampler(valid_idx)
 
     # prepare data loaders
+    loader_options = {
+        "num_workers": num_workers,
+        "pin_memory": torch.cuda.is_available(),
+        "persistent_workers": num_workers > 0,
+    }
     data_loaders["train"] = torch.utils.data.DataLoader(
         train_data,
         batch_size=batch_size,
         sampler=train_sampler,
-        num_workers=num_workers,
+        **loader_options,
     )
     data_loaders["valid"] = torch.utils.data.DataLoader(
-        # YOUR CODE HERE
+        valid_data,
+        batch_size=batch_size,
+        sampler=valid_sampler,
+        **loader_options,
     )
 
     # Now create the test data loader
     test_data = datasets.ImageFolder(
         base_path / "test",
-        # YOUR CODE HERE (add the test transform)
+        transform=data_transforms["test"],
     )
 
     if limit > 0:
-        indices = torch.arange(limit)
+        indices = torch.arange(min(limit, len(test_data)))
         test_sampler = torch.utils.data.SubsetRandomSampler(indices)
     else:
         test_sampler = None
 
     data_loaders["test"] = torch.utils.data.DataLoader(
-        # YOUR CODE HERE (remember to add shuffle=False as well)
+        test_data,
+        batch_size=batch_size,
+        sampler=test_sampler,
+        shuffle=False,
+        **loader_options,
     )
 
     return data_loaders
@@ -126,13 +152,8 @@ def visualize_one_batch(data_loaders, max_n: int = 5):
     :return: None
     """
 
-    # YOUR CODE HERE:
-    # obtain one batch of training images
-    # First obtain an iterator from the train dataloader
-    dataiter = # YOUR CODE HERE
-    # Then call the next() method on the iterator you just
-    # obtained
-    images, labels = # YOUR CODE HERE
+    dataiter = iter(data_loaders["train"])
+    images, labels = next(dataiter)
 
     # Undo the normalization (for visualization purposes)
     mean, std = compute_mean_and_std()
@@ -145,18 +166,17 @@ def visualize_one_batch(data_loaders, max_n: int = 5):
 
     images = invTrans(images)
 
-    # YOUR CODE HERE:
-    # Get class names from the train data loader
-    class_names = # YOUR CODE HERE
+    class_names = data_loaders["train"].dataset.classes
 
     # Convert from BGR (the format used by pytorch) to
     # RGB (the format expected by matplotlib)
     images = torch.permute(images, (0, 2, 3, 1)).clip(0, 1)
 
     # plot the images in the batch, along with the corresponding labels
-    fig = plt.figure(figsize=(25, 4))
-    for idx in range(max_n):
-        ax = fig.add_subplot(1, max_n, idx + 1, xticks=[], yticks=[])
+    num_images = min(max_n, len(images))
+    fig = plt.figure(figsize=(5 * num_images, 4))
+    for idx in range(num_images):
+        ax = fig.add_subplot(1, num_images, idx + 1, xticks=[], yticks=[])
         ax.imshow(images[idx])
         # print out the correct label for each image
         # .item() gets the value contained in a Tensor

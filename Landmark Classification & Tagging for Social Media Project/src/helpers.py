@@ -127,13 +127,63 @@ def compute_mean_and_std():
 
 
 def after_subplot(ax: plt.Axes, group_name: str, x_label: str):
-    """Add title xlabel and legend to single chart"""
-    ax.set_title(group_name)
+    """Style live metrics and overlay an EMA to clarify noisy loss histories."""
+    metric = group_name.lower()
+    titles = {
+        "loss": "Training and validation loss",
+        "lr": "Learning rate",
+        "val_accuracy": "Validation accuracy",
+    }
+    ax.set_title(titles.get(metric, group_name.replace("_", " ").title()))
     ax.set_xlabel(x_label)
-    ax.legend(loc="center right")
+    ax.grid(True, which="major", linestyle="--", linewidth=0.7, alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.margins(x=0.03, y=0.08)
 
-    if group_name.lower() == "loss":
-        ax.set_ylim([None, 4.5])
+    if metric == "loss":
+        ax.set_ylabel("Cross-entropy")
+        ax.set_ylim(bottom=0)
+        for line in tuple(ax.lines):
+            if line.get_gid() == "loss-ema":
+                line.remove()
+        for line in tuple(ax.lines):
+            if line.get_gid() not in (None, "loss-raw"):
+                continue
+            values = line.get_ydata()
+            if len(values) < 2:
+                continue
+
+            if line.get_gid() is None:
+                line.set_gid("loss-raw")
+                line.set_label(f"{line.get_label()} (raw)")
+            smoothed = [values[0]]
+            for value in values[1:]:
+                smoothed.append(0.3 * value + 0.7 * smoothed[-1])
+
+            label = line.get_label()
+            if label.endswith(" (raw)"):
+                label = label[:-6]
+            line.set_alpha(0.25)
+            ema_line, = ax.plot(
+                line.get_xdata(),
+                smoothed,
+                color=line.get_color(),
+                linewidth=2.2,
+                label=f"{label} (EMA)",
+                zorder=line.get_zorder() + 1,
+            )
+            ema_line.set_gid("loss-ema")
+    elif metric == "lr":
+        ax.set_ylabel("Learning rate")
+        ax.set_yscale("log")
+    elif metric == "val_accuracy":
+        ax.set_ylabel("Accuracy (%)")
+        ax.set_ylim(0, 100)
+
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(loc="best", frameon=False)
 
 
 def plot_confusion_matrix(pred, truth):
