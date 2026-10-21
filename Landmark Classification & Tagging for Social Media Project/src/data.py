@@ -10,7 +10,13 @@ import matplotlib.pyplot as plt
 
 
 def get_data_loaders(
-    batch_size: int = 32, valid_size: float = 0.2, num_workers: int = -1, limit: int = -1
+    batch_size: int = 32,
+    valid_size: float = 0.2,
+    num_workers: int = -1,
+    limit: int = -1,
+    *,
+    multiprocessing_context=None,
+    prefetch_factor=None,
 ):
     """
     Create and returns the train_one_epoch, validation and test data loaders.
@@ -21,6 +27,11 @@ def get_data_loaders(
     :param num_workers: number of workers to use in the data loaders. Use -1 to mean
                         "use all my cores"
     :param limit: maximum number of data points to consider
+    :param multiprocessing_context: start method for worker processes (for example
+                        "spawn"). None keeps PyTorch's default (fork on Linux). "spawn"
+                        avoids forking a large, multi-threaded notebook kernel.
+    :param prefetch_factor: batches queued per worker. None keeps PyTorch's
+                        default (2); use 1 to bound shared-memory usage.
     :return a dictionary with 3 keys: 'train_one_epoch', 'valid' and 'test' containing respectively the
             train_one_epoch, validation and test data loaders
     """
@@ -34,6 +45,10 @@ def get_data_loaders(
         raise ValueError("batch_size must be a positive integer")
     if not 0 <= valid_size < 1:
         raise ValueError("valid_size must be in the range [0, 1)")
+    if prefetch_factor is not None and (
+        not isinstance(prefetch_factor, int) or prefetch_factor < 1
+    ):
+        raise ValueError("prefetch_factor must be a positive integer or None")
 
     # We will fill this up later
     data_loaders = {"train": None, "valid": None, "test": None}
@@ -107,6 +122,10 @@ def get_data_loaders(
         "pin_memory": torch.cuda.is_available(),
         "persistent_workers": num_workers > 0,
     }
+    if num_workers > 0 and multiprocessing_context is not None:
+        loader_options["multiprocessing_context"] = multiprocessing_context
+    if num_workers > 0 and prefetch_factor is not None:
+        loader_options["prefetch_factor"] = prefetch_factor
     data_loaders["train"] = torch.utils.data.DataLoader(
         train_data,
         batch_size=batch_size,
@@ -223,3 +242,41 @@ def test_data_loaders_output_shape(data_loaders):
 def test_visualize_one_batch(data_loaders):
 
     visualize_one_batch(data_loaders, max_n=2)
+
+
+@pytest.mark.parametrize("num_workers,prefetch_factor", [(0, 1), (2, 1), (2, None)])
+def test_loader_prefetch_options(tmp_path, monkeypatch, num_workers, prefetch_factor):
+    from PIL import Image
+    from unittest.mock import Mock
+
+    for split in ("train", "test"):
+        folder = tmp_path / split / "landmark"
+        folder.mkdir(parents=True)
+        for i in range(3):
+            Image.new("RGB", (256, 256), color=(128, 128, 128)).save(folder / f"{i}.png")
+
+    monkeypatch.setattr(
+        "src.data.compute_mean_and_std",
+        lambda: (torch.tensor([0.5] * 3), torch.tensor([0.25] * 3)),
+    )
+    monkeypatch.setattr("src.data.get_data_location", lambda: str(tmp_path))
+    loader = Mock()
+    monkeypatch.setattr(torch.utils.data, "DataLoader", loader)
+
+    get_data_loaders(
+        batch_size=2, num_workers=num_workers,
+        multiprocessing_context="spawn", prefetch_factor=prefetch_factor,
+    )
+
+    assert loader.call_count == 3
+    for call in loader.call_args_list:
+        options = call.kwargs
+        assert options["persistent_workers"] == (num_workers > 0)
+        if num_workers > 0:
+            assert options["multiprocessing_context"] == "spawn"
+        else:
+            assert "multiprocessing_context" not in options
+        if num_workers > 0 and prefetch_factor is not None:
+            assert options["prefetch_factor"] == prefetch_factor
+        else:
+            assert "prefetch_factor" not in options

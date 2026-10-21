@@ -1,3 +1,5 @@
+import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -15,6 +17,14 @@ def _device() -> torch.device:
 
 def _autocast(device: torch.device):
     return torch.autocast(device_type=device.type, enabled=device.type == "cuda")
+
+
+def _write_history(history_path, history) -> None:
+    path = Path(history_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path.write_text(json.dumps(history, indent=2))
+    os.replace(tmp_path, path)
 
 
 def train_one_epoch(train_dataloader, model, optimizer, loss, scaler=None):
@@ -113,6 +123,7 @@ def optimize(
     interactive_tracking=False,
     early_stopping_patience=12,
     min_delta=1e-4,
+    history_path=None,
 ):
     if n_epochs < 1:
         raise ValueError("n_epochs must be a positive integer")
@@ -130,6 +141,7 @@ def optimize(
     valid_loss_min = None
     epochs_without_improvement = 0
     logs = {}
+    history = []
     device = _device()
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
 
@@ -181,6 +193,21 @@ def optimize(
             epochs_without_improvement += 1
 
         scheduler.step(valid_loss)
+
+        # livelossplot clears printed output, so persist the exact per-epoch
+        # metrics; rewriting the file every epoch also survives a disconnect
+        if history_path is not None:
+            history.append(
+                {
+                    "epoch": epoch,
+                    "train_loss": train_loss,
+                    "valid_loss": valid_loss,
+                    "valid_accuracy": valid_accuracy,
+                    "lr": epoch_lr,
+                    "saved": epochs_without_improvement == 0,
+                }
+            )
+            _write_history(history_path, history)
 
         # Log the losses and the current learning rate
         if interactive_tracking:
@@ -299,6 +326,23 @@ def test_optimize(data_loaders, optim_objects):
 
     with tempfile.TemporaryDirectory() as temp_dir:
         optimize(data_loaders, model, optimizer, loss, 2, f"{temp_dir}/hey.pt")
+
+
+def test_optimize_saves_history(data_loaders, optim_objects):
+
+    model, loss, optimizer = optim_objects
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        history_path = Path(temp_dir) / "history.json"
+        optimize(
+            data_loaders, model, optimizer, loss, 2, f"{temp_dir}/hey.pt",
+            history_path=history_path,
+        )
+        history = json.loads(history_path.read_text())
+
+    assert [row["epoch"] for row in history] == [1, 2]
+    assert {"train_loss", "valid_loss", "valid_accuracy", "lr", "saved"} <= set(history[0])
+    assert history[0]["saved"], "The first epoch always sets a new best checkpoint"
 
 
 def test_one_epoch_test(data_loaders, optim_objects):

@@ -44,6 +44,12 @@ def predictor_test(test_dataloader, model_reloaded):
         batch_size=test_dataloader.batch_size or 32,
         num_workers=test_dataloader.num_workers,
         pin_memory=torch.cuda.is_available(),
+        # Reuse the caller's worker start method (None keeps PyTorch's default)
+        multiprocessing_context=(
+            test_dataloader.multiprocessing_context
+            if test_dataloader.num_workers > 0
+            else None
+        ),
     )
     try:
         device = next(model_reloaded.parameters()).device
