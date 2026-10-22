@@ -122,15 +122,20 @@ def optimize(
     save_path,
     interactive_tracking=False,
     early_stopping_patience=12,
-    min_delta=1e-4,
+    min_delta=0.01,
     history_path=None,
 ):
+    """Train with a plateau scheduler and checkpoint relative loss improvements.
+
+    ``min_delta`` is a relative fraction: the default 0.01 saves a checkpoint
+    only when validation loss is strictly more than 1% below the saved minimum.
+    """
     if n_epochs < 1:
         raise ValueError("n_epochs must be a positive integer")
     if early_stopping_patience < 1:
         raise ValueError("early_stopping_patience must be a positive integer")
-    if min_delta < 0:
-        raise ValueError("min_delta must be non-negative")
+    if not 0 <= min_delta < 1:
+        raise ValueError("min_delta must be in the range [0, 1)")
 
     # initialize tracker for minimum validation loss
     if interactive_tracking:
@@ -180,8 +185,8 @@ def optimize(
             )
         )
 
-        # Save checkpoints only when validation loss improves beyond min_delta.
-        if valid_loss_min is None or valid_loss < valid_loss_min - min_delta:
+        # Save only on a relative improvement greater than min_delta.
+        if valid_loss_min is None or valid_loss < valid_loss_min * (1 - min_delta):
             print(f"New minimum validation loss: {valid_loss:.6f}. Saving model ...")
 
             valid_loss_min = valid_loss
@@ -326,6 +331,55 @@ def test_optimize(data_loaders, optim_objects):
 
     with tempfile.TemporaryDirectory() as temp_dir:
         optimize(data_loaders, model, optimizer, loss, 2, f"{temp_dir}/hey.pt")
+
+
+def test_optimize_requires_relative_improvement_to_save_checkpoint(monkeypatch, tmp_path):
+    from torch import nn
+
+    model = nn.Linear(1, 2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    valid_losses = iter((1.0, 0.991, 0.99, 0.989))
+    monkeypatch.setattr(
+        "src.train.train_one_epoch",
+        lambda *args, **kwargs: 1.0,
+    )
+    monkeypatch.setattr(
+        "src.train.valid_one_epoch",
+        lambda *args, **kwargs: (next(valid_losses), 50.0),
+    )
+    history_path = tmp_path / "history.json"
+
+    optimize(
+        {"train": [], "valid": []},
+        model,
+        optimizer,
+        nn.CrossEntropyLoss(),
+        n_epochs=4,
+        save_path=tmp_path / "best.pt",
+        history_path=history_path,
+    )
+
+    history = json.loads(history_path.read_text())
+    assert [row["saved"] for row in history] == [True, False, False, True]
+
+
+@pytest.mark.parametrize("min_delta", (-0.01, 1.0, 1.2))
+def test_optimize_rejects_invalid_relative_min_delta(min_delta):
+    from torch import nn
+
+    model = nn.Linear(1, 2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+
+    with pytest.raises(ValueError, match=r"\[0, 1\)"):
+        optimize(
+            {"train": [], "valid": []},
+            model,
+            optimizer,
+            nn.CrossEntropyLoss(),
+            n_epochs=1,
+            save_path="unused.pt",
+            min_delta=min_delta,
+        )
 
 
 def test_optimize_saves_history(data_loaders, optim_objects):
