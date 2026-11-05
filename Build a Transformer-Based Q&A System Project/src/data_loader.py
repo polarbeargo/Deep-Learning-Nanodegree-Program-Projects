@@ -119,12 +119,11 @@ class DataLoader:
             if query_sample_size and len(queries) > query_sample_size:
                 logger.info(f"Sampling {query_sample_size} queries and their related documents...")
                 
-                # Set random seed for reproducibility
-                np.random.seed(random_seed)
+                rng = np.random.default_rng(random_seed)
                 
                 # Randomly sample query IDs
                 all_query_ids = list(queries.keys())
-                sampled_query_ids = np.random.choice(all_query_ids, size=query_sample_size, replace=False).tolist()
+                sampled_query_ids = rng.choice(all_query_ids, size=query_sample_size, replace=False).tolist()
                 
                 # Filter queries to sampled ones
                 queries = {q_id: queries[q_id] for q_id in sampled_query_ids}
@@ -141,7 +140,7 @@ class DataLoader:
                 
                 # Filter corpus to only needed documents
                 original_corpus_size = len(corpus)
-                corpus = {doc_id: corpus[doc_id] for doc_id in needed_doc_ids if doc_id in corpus}
+                corpus = {doc_id: corpus[doc_id] for doc_id in sorted(needed_doc_ids) if doc_id in corpus}
                 qrels = sampled_qrels
                 
                 logger.info(f"Smart sampling completed:")
