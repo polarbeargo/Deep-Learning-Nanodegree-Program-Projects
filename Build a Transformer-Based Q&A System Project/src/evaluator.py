@@ -4,6 +4,11 @@ Evaluation Metrics for Information Retrieval
 import numpy as np
 from typing import Dict, List
 
+if __package__:
+    from .retrieval_utils import validate_k
+else:
+    from retrieval_utils import validate_k
+
 
 class IRMetrics:
     """Information Retrieval evaluation metrics."""
@@ -18,29 +23,29 @@ class IRMetrics:
             qrels: {query_id: {doc_id: relevance_score}}
             k: cutoff for top-k evaluation
         """
+        validate_k(k)
         recall_scores = []
-        for q_id in results:
-            if q_id not in qrels:
-                continue
+        for q_id, judgments in qrels.items():
+            relevant = {doc_id for doc_id, score in judgments.items() if score > 0}
+            found = set(results.get(q_id, [])[:k]) & relevant
+            recall_scores.append(len(found) / len(relevant) if relevant else 0.0)
             
-            # YOUR CODE HERE: Calculate recall for this query
-            
-        return np.mean(recall_scores) if recall_scores else 0.0
+        return float(np.mean(recall_scores)) if recall_scores else 0.0
 
     @staticmethod
     def precision_at_k(results: Dict[int, List[int]], qrels: Dict[int, Dict[int, int]], k: int) -> float:
         """
         Calculate Precision@k: fraction of top-k that are relevant.
         """
+        validate_k(k)
         precision_scores = []
-        for q_id in results:
-            if q_id not in qrels:
-                continue
-            
-            # YOUR CODE HERE: Calculate precision for this query
+        for q_id, judgments in qrels.items():
+            relevant = {doc_id for doc_id, score in judgments.items() if score > 0}
+            found = set(results.get(q_id, [])[:k]) & relevant
+            precision_scores.append(len(found) / k if k else 0.0)
 
             
-        return np.mean(precision_scores) if precision_scores else 0.0
+        return float(np.mean(precision_scores)) if precision_scores else 0.0
 
     @staticmethod
     def mrr(results: Dict[int, List[int]], qrels: Dict[int, Dict[int, int]]) -> float:
@@ -48,14 +53,16 @@ class IRMetrics:
         Calculate Mean Reciprocal Rank (MRR).
         """
         reciprocal_ranks = []
-        for q_id in results:
-            if q_id not in qrels:
-                continue
-            
-            # YOUR CODE HERE: Calculate MRR for this query
+        for q_id, judgments in qrels.items():
+            reciprocal_rank = 0.0
+            for rank, doc_id in enumerate(results.get(q_id, []), start=1):
+                if judgments.get(doc_id, 0) > 0:
+                    reciprocal_rank = 1.0 / rank
+                    break
+            reciprocal_ranks.append(reciprocal_rank)
 
             
-        return np.mean(reciprocal_ranks) if reciprocal_ranks else 0.0
+        return float(np.mean(reciprocal_ranks)) if reciprocal_ranks else 0.0
 
     @staticmethod
     def evaluate_retrieval(results: Dict[int, List[int]], qrels: Dict[int, Dict[int, int]]) -> Dict[str, float]:
