@@ -8,27 +8,24 @@ using BM25, Word2Vec, and Transformer-based retrievers.
 import streamlit as st
 import sys
 import os
-import numpy as np
-import matplotlib.pyplot as plt
 from typing import Dict, List, Any
-import time
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-# Add the src directory to the path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
+# Resolve the project package independently of Streamlit's working directory.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import our existing retrievers
 try:
-    from bm25_retriever import BM25Retriever
-    from transformer_retriever import TransformerRetriever
-    from word2vec_retriever import Word2VecRetriever
-    from evaluator import IRMetrics
+    from src.bm25_retriever import BM25Retriever
+    from src.transformer_retriever import TransformerRetriever
+    from src.word2vec_retriever import Word2VecRetriever
+    from src.evaluator import IRMetrics
 except ImportError as e:
     st.error(f"Error importing retrievers: {e}")
-    st.error("Please ensure you're running this from the correct directory with access to the src folder.")
+    st.error("Please ensure the project modules and their dependencies are installed.")
     st.stop()
 
 # Import demo data and RAG system
@@ -91,8 +88,8 @@ def initialize_retrievers():
         bm25 = BM25Retriever()
         bm25.build_index(CORPUS_TEXTS)
         
-        # Transformer Retriever - use a more powerful model for better performance
-        transformer = TransformerRetriever(model_name="all-mpnet-base-v2")
+        # Match the notebook's lightweight default encoder.
+        transformer = TransformerRetriever(model_name="all-MiniLM-L6-v2")
         transformer.build_index(CORPUS_TEXTS)
         
         # Word2Vec Retriever - optimized for small corpus
@@ -109,33 +106,38 @@ def initialize_retrievers():
     return {
         "BM25 (Keywords)": bm25,
         "Word2Vec (Static Embeddings)": word2vec,
-        "Transformer (MPNet-base-v2)": transformer
+        "Transformer (MiniLM-L6-v2)": transformer
     }
 
-def evaluate_retrieval(query: str, retrieved_indices: List[int], ground_truth: List[int]) -> Dict[str, float]:
+def evaluate_retrieval(query: str, retrieved_indices: List[int], ground_truth: List[int],
+                       k: int) -> Dict[str, Any]:
     """Evaluate retrieval performance for a query."""
     if not ground_truth:
         return {
             "precision": None, 
             "recall": None, 
             "f1": None,
+            "mrr": None,
             "relevant_found": None,
             "total_relevant": 0
         }
     
-    retrieved_set = set(retrieved_indices)
+    retrieved_set = set(retrieved_indices[:k])
     relevant_set = set(ground_truth)
     
     # Calculate metrics
     true_positives = len(retrieved_set & relevant_set)
-    precision = true_positives / len(retrieved_set) if retrieved_set else 0.0
-    recall = true_positives / len(relevant_set) if relevant_set else 0.0
+    results = {0: retrieved_indices[:k]}
+    qrels = {0: {doc: 1 for doc in relevant_set}}
+    precision = IRMetrics.precision_at_k(results, qrels, k)
+    recall = IRMetrics.recall_at_k(results, qrels, k)
     f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
     
     return {
         "precision": precision,
         "recall": recall,
         "f1": f1,
+        "mrr": IRMetrics.mrr(results, qrels),
         "relevant_found": true_positives,
         "total_relevant": len(relevant_set)
     }
@@ -151,7 +153,7 @@ def display_retrieved_documents(method_name: str, retrieved_indices: List[int],
     
     st.markdown("**📄 Retrieved Documents (Ranked by Similarity):**")
     
-    for i, doc_idx in enumerate(retrieved_indices[:3], 1):
+    for i, doc_idx in enumerate(retrieved_indices, 1):
         if doc_idx < len(DEMO_CORPUS):
             doc = DEMO_CORPUS[doc_idx]
             
@@ -203,9 +205,16 @@ def main():
     
     enable_rag = st.sidebar.checkbox(
         "Enable RAG Answers",
-        value=bool(openai_api_key),
+        value=False,
         help="Generate answers using retrieved documents (requires OpenAI API key in .env file)"
     )
+    if enable_rag:
+        st.sidebar.warning(
+            "Answer generation sends your query and retrieved passages to OpenAI. "
+            "Use only non-sensitive information you are authorized to share."
+        )
+        if not openai_api_key:
+            st.sidebar.error("Set OPENAI_API_KEY to enable answer generation.")
     
     num_docs = st.sidebar.slider(
         "Number of documents to retrieve",
@@ -222,7 +231,11 @@ def main():
     )
     
     # Initialize retrievers
-    retrievers = initialize_retrievers()
+    try:
+        retrievers = initialize_retrievers()
+    except Exception as exc:
+        st.error(f"Retriever initialization failed: {exc}")
+        st.stop()
     
     # RAG System initialization
     rag_system = None
@@ -299,12 +312,16 @@ def main():
                 retrieval_results[method_name] = retrieved_indices
                 
                 # Evaluate performance
-                eval_results[method_name] = evaluate_retrieval(query, retrieved_indices, ground_truth)
+                eval_results[method_name] = evaluate_retrieval(
+                    query, retrieved_indices, ground_truth, num_docs,
+                )
         
         # Get RAG results if enabled
         if enable_rag and rag_system:
             with st.spinner("🤖 Generating RAG answers..."):
-                rag_results = rag_system.compare_rag_methods(query, retrievers, CORPUS_TEXTS, k=num_docs)
+                for method_name, indices in retrieval_results.items():
+                    docs = [CORPUS_TEXTS[index] for index in indices]
+                    rag_results[method_name] = rag_system.generate_answer(query, docs)
         
         # Display results in columns
         cols = st.columns(len(retrievers))
@@ -313,7 +330,11 @@ def main():
             with cols[i]:
                 rag_answer = None
                 if enable_rag and method_name in rag_results:
-                    rag_answer = rag_results[method_name].get('answer', '')
+                    result = rag_results[method_name]
+                    if result['success']:
+                        rag_answer = result['answer']
+                    else:
+                        st.error(f"Answer generation failed: {result['error']}")
                 
                 display_retrieved_documents(method_name, retrieved_indices, ground_truth, rag_answer)
                 
@@ -323,8 +344,9 @@ def main():
                     st.markdown(f"""
                     <div class="metric-card">
                         <h4>📊 Performance</h4>
-                        <p><strong>Precision:</strong> {eval_data['precision']:.2f}</p>
-                        <p><strong>Recall:</strong> {eval_data['recall']:.2f}</p>
+                        <p><strong>Precision@{num_docs}:</strong> {eval_data['precision']:.2f}</p>
+                        <p><strong>Recall@{num_docs}:</strong> {eval_data['recall']:.2f}</p>
+                        <p><strong>Reciprocal Rank@{num_docs}:</strong> {eval_data['mrr']:.2f}</p>
                         <p><strong>F1-Score:</strong> {eval_data['f1']:.2f}</p>
                         <p><strong>Relevant Found:</strong> {eval_data['relevant_found']}/{eval_data['total_relevant']}</p>
                     </div>
