@@ -1,10 +1,14 @@
 """
 BM25 Retrieval Implementation for Baseline Comparison
 """
-import numpy as np
-from typing import List, Dict, Tuple
+from typing import List, Dict
 from rank_bm25 import BM25Okapi
 from tqdm import tqdm
+
+if __package__:
+    from .retrieval_utils import top_k_indices, validate_k, validate_texts
+else:
+    from retrieval_utils import top_k_indices, validate_k, validate_texts
 
 
 class BM25Retriever:
@@ -25,16 +29,13 @@ class BM25Retriever:
         
     def build_index(self, corpus_texts: List[str]):
         """Build BM25 index from corpus texts."""
+        validate_texts(corpus_texts, corpus=True)
+        tokenized_corpus = [text.lower().split() for text in corpus_texts]
+        if not any(tokenized_corpus):
+            raise ValueError("Corpus must contain at least one token.")
         print("🔧 Building BM25 index...")
-        self.corpus = corpus_texts
-        
-        # YOUR CODE HERE: Tokenize each document in corpus_texts
-        # Convert each document to lowercase and split into tokens
-        tokenized_corpus = None
-        
-        # YOUR CODE HERE: Create BM25Okapi index using tokenized_corpus
-        # Use self.k1 and self.b parameters
-        self.bm25 = None
+        self.bm25 = BM25Okapi(tokenized_corpus, k1=self.k1, b=self.b)
+        self.corpus = list(corpus_texts)
         
         print(f"✅ BM25 index built for {len(corpus_texts):,} documents")
         
@@ -42,22 +43,16 @@ class BM25Retriever:
         """Retrieve top-k documents for each query."""
         if self.bm25 is None:
             raise ValueError("Index not built. Call build_index() first.")
+        validate_texts(query_texts)
+        validate_k(k)
             
         print(f"🔍 Running BM25 retrieval for {len(query_texts)} queries...")
         results = {}
         
         for q_idx, query in enumerate(tqdm(query_texts, desc="Retrieving")):
-            # YOUR CODE HERE: Tokenize the query (same as corpus tokenization)
-            tokenized_query = None
-            
-            # YOUR CODE HERE: Get BM25 scores for all documents using tokenized_query
-            doc_scores = None
-            
-            # YOUR CODE HERE: Find top-k document indices with highest scores
-            # Use np.argsort with reverse order and slice to k
-            top_k_indices = None
-            
-            results[q_idx] = top_k_indices.tolist()
+            tokenized_query = query.lower().split()
+            doc_scores = self.bm25.get_scores(tokenized_query)
+            results[q_idx] = top_k_indices(doc_scores, k).tolist()
             
         print(f"✅ Retrieved top-{k} documents for {len(query_texts)} queries")
         return results
