@@ -1,58 +1,15 @@
-# Transformer-Based Semantic Retrieval System - Starter
+# Transformer-Based Semantic Retrieval
 
-## Welcome to Your Retrieval System Project! 🎯
+Compare BM25, corpus-trained Word2Vec and pretrained SentenceTransformers on
+identical queries and relevance judgments, then use them in a Streamlit RAG demo.
 
-This project will guide you through building and comparing different retrieval systems, from traditional keyword-based search to modern semantic search using transformers. You'll experience the evolution of information retrieval and understand the foundations of RAG (Retrieval-Augmented Generation) systems.
+## Run
 
-## Project Structure
-
-```
-project/starter/
-├── src/                                       # Core retrieval modules
-│   ├── data_loader.py                        # BeIR/Natural Questions dataset handler
-│   ├── bm25_retriever.py                     # Traditional keyword-based retrieval
-│   ├── word2vec_retriever.py                 # Static embedding retrieval
-│   ├── transformer_retriever.py              # Semantic transformer retrieval
-│   ├── evaluator.py                          # IR metrics calculation
-│   └── utils.py                              # Utility functions
-├── tests/                                     # Unit test suite for validation
-│   ├── test_bm25_retriever.py                # BM25 retriever tests
-│   ├── test_transformer_retriever.py         # Transformer retriever tests  
-│   ├── test_word2vec_retriever.py            # Word2Vec retriever tests
-│   └── test_evaluator.py                     # IR metrics evaluator tests
-├── streamlit/                                 # Interactive RAG demo application
-│   ├── app.py                                # Streamlit comparison interface
-│   ├── rag_system.py                         # RAG implementation with OpenAI
-│   ├── demo_data.py                          # TechFlow AI demo corpus
-│   └── .env.example                          # Environment variables template
-├── notebooks/
-│   └── unified_retrieval_comparison.ipynb    # Main analysis notebook
-├── dataset/                                   # Natural Questions test dataset
-├── .venv/                                     # Python virtual environment
-└── requirements.txt                           # All dependencies
-```
-
-## Quick Start Guide
-
-### **🔧 Environment Setup (Already Done!)**
-Your environment is ready with all dependencies installed. To verify:
+Use your existing Python environment; a new virtual environment is not required.
+From this project directory:
 
 ```bash
-# Navigate to starter directory
-cd project/starter
-
-# Check that virtual environment is working
-source .venv/bin/activate  # Linux/Mac
-# .venv\Scripts\activate    # Windows
-
-# Verify installation
-python -c "import sentence_transformers; print('✅ All dependencies ready!')"
-```
-
-### **🧪 Validate Your Implementation**
-As you complete each component, run the corresponding tests to validate your work:
-
-```bash
+pip install -r requirements.txt
 # Run all tests (initially many will fail - this is expected!)
 python -m pytest tests/ -v
 
@@ -64,14 +21,10 @@ python tests/test_transformer_retriever.py  # Transformer semantic search
 
 # Final validation - all tests should pass when complete
 python -m pytest tests/ -v
+
 ```
 
-**Expected progression:**
-- **Initially**: Many tests fail with helpful error messages
-- **During implementation**: Tests pass as you complete each section
-- **Final result**: All tests pass, confirming your implementation
-
-### **🎮 Try the Interactive Demo**
+### **Try the Interactive Demo**
 ```bash
 # Navigate to streamlit directory
 cd streamlit
@@ -84,164 +37,121 @@ cp .env.example .env
 streamlit run app.py
 ```
 
-### **🔬 Run the Analysis**
-```bash
-# Start Jupyter for the main analysis
-jupyter lab notebooks/unified_retrieval_comparison.ipynb
+The transformer downloads Hugging Face model weights on first use and reuses
+the local model cache afterward. Tests for the real transformer and Streamlit
+require these weights; the numerical contract tests mock the encoder to verify
+ranking independently of pretrained model quality.
+
+The notebook defaults to the bundled fictional TechFlow AI dataset for a fast,
+end-to-end run. Change `DATASET` to `"nq"` for a 200-query BEIR Natural Questions
+experiment (a large initial dataset download). Run all cells in order and save
+the executed notebook to retain the measured table, rankings and PCA plot.
+Larger transformer comparisons are opt-in via `RUN_EXTRA_MODELS`.
+
+## Implementation
+
+| Module | Responsibility |
+|---|---|
+| [bm25_retriever.py](src/bm25_retriever.py) | Lowercase/whitespace tokenization, BM25Okapi index, ranked document IDs |
+| [word2vec_retriever.py](src/word2vec_retriever.py) | Corpus-only Word2Vec training, averaged vectors, cosine search, validation parameter search |
+| [transformer_retriever.py](src/transformer_retriever.py) | Batched sentence-transformer document/query encoding and cosine search |
+| [retrieval_utils.py](src/retrieval_utils.py) | Shared exact, bounded-memory cosine ranking and deterministic top-k selection |
+| [evaluator.py](src/evaluator.py) | Recall@k, Precision@k and MRR implemented directly from relevance judgments |
+| [unified_retrieval_comparison.ipynb](notebooks/unified_retrieval_comparison.ipynb) | Query-disjoint tuning/evaluation, quality/runtime comparison, PCA, RAG explanation |
+| [app.py](streamlit/app.py) | Cached retrievers, common evaluation metrics, optional generation |
+
+### Retrieval API and efficiency
+
+```python
+from src.transformer_retriever import TransformerRetriever
+
+retriever = TransformerRetriever("all-MiniLM-L6-v2", batch_size=64)
+retriever.build_index(["A document about neural networks.", "A guide to gardening."])
+results = retriever.retrieve(["How do neural networks work?"], k=1)
+# {0: [document_id]} -- IDs are zero-based positions in the original corpus.
 ```
 
-## Implementation Guide
+All three retrievers return `{query_index: [document_index, ...]}` in descending
+score order. Equal scores break ties by ascending document index. `k` must be a
+non-negative integer: zero yields empty rankings; oversized values are capped
+at corpus size. Empty query lists return `{}`. Unbuilt indexes, empty corpora
+and invalid inputs raise explicit errors. BM25 rejects all-blank corpora;
+Word2Vec rejects corpora with no surviving vocabulary.
 
-### **📚 Source Files You'll Need to Implement**
+SentenceTransformers returns float32 NumPy embeddings with shape
+`(n_samples, embedding_dim)` (384 dimensions for MiniLM). Corpus embeddings are
+computed once per index; queries are batch-encoded with the same encoder.
+Normalized dot products implement cosine similarity. Search uses blocks of
+64 queries and 16,384 documents, limiting the score block to about 4 MiB, and
+partial selection rather than sorting the entire corpus for small k. This is
+exact search, not an approximate nearest-neighbor index; computation still
+scales with the number of query/document pairs. For much larger corpora,
+consider an ANN index after measuring the recall/latency trade-off.
 
-Your task is to complete the missing implementations in the core retrieval modules. Each file contains detailed "YOUR CODE HERE" sections with guidance:
+Word2Vec averages in-vocabulary vectors and caches normalized document vectors.
+Queries with no known words produce zero vectors; a warning explains that all
+scores tie and the returned IDs carry no semantic evidence. Defaults use a
+fixed seed, stable vocabulary hash and one worker for reproducible training.
+You may increase `workers` for large corpora at the cost of reproducibility.
+Parameter search selects validation MRR, then Recall@5, and returns both its log
+and the trained `best_retriever`, avoiding a redundant training run. Failures are
+not suppressed or replaced with synthetic metrics.
 
-#### **🔧 `src/bm25_retriever.py` - Traditional Keyword Search**
-**What you'll implement:**
-- **Text tokenization** and preprocessing for BM25 scoring
-- **BM25 index creation** using the rank-bm25 library
-- **Retrieval logic** to find and rank top-k documents
-- **Understanding**: Learn tf-idf concepts and traditional IR methods
+### Evaluation conventions
 
-**Key concepts:** Tokenization, BM25 scoring, keyword matching, document frequency
+- Only relevance scores **greater than zero** count as relevant.
+- Recall@k counts distinct relevant IDs among the first k ranks, divided by
+  the number of relevant documents.
+- Precision@k divides that count by **k**, even for shorter rankings.
+- MRR averages `1 / first_relevant_rank`, or zero if none was returned.
+- All queries in qrels contribute to the macro-average. Missing results and
+  queries without positive judgments score zero; extra unjudged query IDs are
+  ignored. Duplicate IDs cannot inflate recall or precision. Empty evaluations
+  and k=0 cutoffs yield zero.
+- Notebook rankings are capped at 20, so its MRR is effectively **MRR@20**.
+  The demo displays reciprocal rank at the selected cutoff for a single query.
 
-#### **🔤 `src/word2vec_retriever.py` - Static Word Embeddings**
-**What you'll implement:**
-- **Text preprocessing** for Word2Vec training (stopwords, tokenization)
-- **Word2Vec model training** with gensim library
-- **Document vectorization** by averaging word embeddings
-- **Similarity search** using cosine similarity
-- **Parameter optimization** through grid search experiments
+The notebook separates tuning from held-out queries before Word2Vec search;
+all final methods use the same held-out queries. The demo has only five
+documents, so Recall@5/@10 saturate, and paraphrases can cross the query split.
+Treat it as an integration demonstration, not a generalization benchmark.
+The existing NQ sampler retains documents judged for sampled queries, rather
+than the entire NQ corpus; reported scores apply to that reduced candidate pool.
+Transformer pretraining uses external data whereas Word2Vec trains only on the
+provided corpus. Those are different training budgets, not a controlled
+architecture-only comparison.
 
-**Key concepts:** Word embeddings, vector averaging, cosine similarity, hyperparameter tuning
+The notebook prints actual metrics, setup/query timings, differences from BM25,
+and example rankings. No method is assumed to win. Setup time includes model
+loading/download or Word2Vec tuning; it is not a pure index-building benchmark.
+PCA jointly projects document/query vectors into 2D with an explained-variance
+label. Its geometry illustrates associations, not a replacement for IR metrics.
+Long documents are truncated to the sentence model's token limit: production
+applications should index overlapping text chunks with source metadata.
 
-#### **🤖 `src/transformer_retriever.py` - Modern Semantic Search**
-**What you'll implement:**
-- **Corpus encoding** using sentence transformers
-- **Query encoding** with the same transformer model
-- **Semantic similarity computation** and top-k retrieval
-- **Understanding**: Experience state-of-the-art semantic search
+## Retrieval-Augmented Generation
 
-**Key concepts:** Sentence embeddings, contextual understanding, transformer models, semantic similarity
+RAG performs **retrieval followed by generation**. A retriever selects relevant
+documents or chunks from an indexed knowledge base. A generator, usually an
+LLM, receives the question and retrieved passages and synthesizes a grounded
+answer with source citations. Retrieval does not change generator weights.
+Incomplete or irrelevant evidence can still produce incorrect answers, so
+retrieval metrics and grounded-answer evaluation are both needed.
 
-#### **📊 `src/evaluator.py` - Information Retrieval Metrics**
-**What you'll implement:**
-- **Recall@k calculation**: Fraction of relevant documents found
-- **Precision@k calculation**: Fraction of retrieved documents that are relevant  
-- **Mean Reciprocal Rank (MRR)**: Quality of first relevant result
-- **Understanding**: Learn how to measure retrieval system performance
+Search-enabled ChatGPT, Perplexity and code-context features in Copilot
+illustrate this pattern; their production systems are more complex and need
+not use these particular retrieval models. BM25 excels at exact terms,
+Word2Vec adds static word associations, and transformers capture contextual
+sentence meaning and paraphrases. Which performs best depends on the corpus,
+queries and deployment budget; hybrid search can combine their strengths.
 
-**Key concepts:** Evaluation metrics, relevance judgments, performance measurement
+### Optional generation in the demo
 
-#### **📁 `src/data_loader.py` - Already Complete!**
-This file handles the complex BeIR dataset loading and preprocessing. **No implementation needed** - focus on the retrieval algorithms!
-
-#### **🛠️ `src/utils.py` - Already Complete!**
-Contains utility functions for text processing and system operations. **No implementation needed**.
-
-### **🎯 Learning Progression**
-
-**Start with:** `bm25_retriever.py` (traditional approach, simpler concepts)
-**Continue with:** `evaluator.py` (understand how to measure success) 
-**Progress to:** `word2vec_retriever.py` (static embeddings, more complex)
-**Finish with:** `transformer_retriever.py` (modern semantic search)
-
-### **🧪 Testing Your Implementation**
-
-Each component has focused tests that will **fail until you implement the core functionality**:
-
-```bash
-# Test individual components as you implement them
-python tests/test_bm25_retriever.py        # Should show 4/5 tests failing initially
-python tests/test_evaluator.py             # Should show 4/5 tests failing initially  
-python tests/test_word2vec_retriever.py     # Should show 4/5 tests failing initially
-python tests/test_transformer_retriever.py  # Should show 4/5 tests failing initially
-```
-
-**Success indicators:**
-- Tests pass once you complete the implementation
-- Error messages guide you to missing functionality
-- Each test validates core concepts you need to understand
-
-## Learning Path
-
-### **Phase 1: Understanding the Components** 🧭
-
-**Explore the retrievers in `src/`:**
-1. **`bm25_retriever.py`** - Traditional keyword matching
-2. **`word2vec_retriever.py`** - Static word embeddings
-3. **`transformer_retriever.py`** - Modern semantic search
-
-**Key questions to explore:**
-- How does each method represent documents and queries?
-- What are the trade-offs between speed and semantic understanding?
-- When would you use each approach in practice?
-
-### **Phase 2: Interactive Exploration** 🎯
-
-**Use the Streamlit demo to:**
-- Compare how different methods retrieve documents
-- See how retrieval quality affects RAG answers
-- Test with your own queries about TechFlow AI
-
-
-### **Phase 3: Quantitative Analysis** 📊
-
-**In the Jupyter notebook:**
-- Understand IR evaluation metrics (Recall@k, Precision@k, MRR)
-- Compare performance on the Natural Questions dataset
-- Analyze when each method succeeds or fails
-
-## Test Suite Overview
-
-### **Quality Assurance: Unit Tests** ✅
-
-Your implementation is validated by a comprehensive test suite:
-
-- **Core Functionality**: Indexing, retrieval, ranking for all methods
-- **Semantic Understanding**: Synonym handling, context awareness
-- **Edge Cases**: Empty queries, out-of-vocabulary words
-- **Consistency**: Deterministic behavior, proper parameter handling
-- **Integration**: Component interaction and data flow
-
-### **Expected Test Results**
-```bash
-🎯 INITIAL STATE (before implementation):
-❌ ~16-20 tests FAILING (expected - implementations incomplete)
-✅ ~5 tests PASSING (initialization and setup tests)
-
-🚀 FINAL STATE (after complete implementation):
-✅ 20 tests PASSING across all components
-❌ 0 tests FAILED
-
-Components to implement:
-- BM25Retriever: 4 implementation sections → 5 tests ✅
-- TransformerRetriever: 2 implementation sections → 5 tests ✅
-- Word2VecRetriever: 8 implementation sections → 5 tests ✅
-- IRMetrics: 3 implementation sections → 5 tests ✅
-```
-
-## Key Concepts You'll Learn
-
-### **🔍 Information Retrieval Evolution**
-1. **Keyword-based (BM25)**: Fast, exact matching, good for technical terms
-2. **Static Embeddings (Word2Vec)**: Basic semantic understanding, resource-efficient
-3. **Contextual Embeddings (Transformers)**: Deep semantic understanding, best quality
-
-### **📈 Evaluation Metrics**
-- **Recall@k**: What fraction of relevant documents are retrieved?
-- **Precision@k**: What fraction of retrieved documents are relevant?
-- **MRR (Mean Reciprocal Rank)**: How quickly do we find the first relevant document?
-
-### **🏗️ RAG Pipeline**
-- **Retrieval**: Find relevant context documents
-- **Augmentation**: Combine query + retrieved context  
-- **Generation**: Use LLM to generate informed answers
-
-
-### **Real-World Applications:**
-- **Enterprise Search**: Internal knowledge bases
-- **Customer Support**: AI chatbots with document retrieval
-- **Research Tools**: Academic paper search
-- **E-commerce**: Product search and recommendations
-- **Developer Tools**: Code search and completion
+Retrieval requires **no API key**. Generation is **off by default**, even when a
+key exists. To use it, configure `OPENAI_API_KEY` via your environment or a local
+`.env` file using [the example](streamlit/.env.example), then opt in in the UI.
+Never commit the key. Generation sends the query and selected passages to an
+external provider: use only non-sensitive information you are authorized to
+share. Do not send private code, personal data or credentials. The app warns
+before generation and reuses already retrieved passages instead of repeating
+all searches. No external generation call is needed for tests or evaluation.
