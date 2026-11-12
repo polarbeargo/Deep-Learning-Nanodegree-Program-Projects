@@ -10,6 +10,8 @@ import torch.nn.functional as F
 import math
 
 def timestep_embedding(timesteps, dim):
+    if dim < 2:
+        raise ValueError("Time embedding dimension must be at least two.")
     device = timesteps.device
     half = dim // 2
     freqs = torch.exp(-math.log(10000) * torch.arange(half, device=device) / half)
@@ -45,6 +47,15 @@ class ResidualBlock(nn.Module):
 class ConditionalUNet(nn.Module):
     def __init__(self, num_classes=10, img_channels=1, base_channels=64, time_dim=128):
         super().__init__()
+        if base_channels < 8 or base_channels % 8:
+            raise ValueError("base_channels must be a positive multiple of eight.")
+        if time_dim < 2:
+            raise ValueError("time_dim must be at least two.")
+        self.time_dim = time_dim
+        self.config = dict(
+            num_classes=num_classes, img_channels=img_channels,
+            base_channels=base_channels, time_dim=time_dim,
+        )
         self.time_mlp = nn.Sequential(
             nn.Linear(time_dim, time_dim), nn.SiLU(),
             nn.Linear(time_dim, time_dim)
@@ -63,15 +74,15 @@ class ConditionalUNet(nn.Module):
         self.output = nn.Conv2d(base_channels, img_channels, 1)
 
     def forward(self, x, t, y):
-        t_emb = self.time_mlp(timestep_embedding(t, t.shape[0] * 0 + 128))
+        t_emb = self.time_mlp(timestep_embedding(t, self.time_dim))
         h1 = self.down1(x, t_emb, y)
         h2 = self.down2(F.avg_pool2d(h1, 2), t_emb, y)
         h3 = self.down3(F.avg_pool2d(h2, 2), t_emb, y)
 
         h_mid = self.mid(h3, t_emb, y)
 
-        h = self.up3(torch.cat([F.interpolate(h_mid, scale_factor=2), h2], dim=1), t_emb, y)
-        h = self.up2(torch.cat([F.interpolate(h, scale_factor=2), h1], dim=1), t_emb, y)
-        h = self.up1(torch.cat([F.interpolate(h, scale_factor=1), x], dim=1), t_emb, y)
+        h = self.up3(torch.cat([F.interpolate(h_mid, size=h2.shape[-2:]), h2], dim=1), t_emb, y)
+        h = self.up2(torch.cat([F.interpolate(h, size=h1.shape[-2:]), h1], dim=1), t_emb, y)
+        h = self.up1(torch.cat([h, x], dim=1), t_emb, y)
 
         return self.output(h)
