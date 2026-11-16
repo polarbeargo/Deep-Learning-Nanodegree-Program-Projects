@@ -1,130 +1,162 @@
-# Conditional Generative Models for Handwritten CAPTCHAs 
-This project explores **conditional generative models** to ceate synthetic handwritten digits for CAPTCHA-style human verification 
+# Conditional Handwriting Generation
 
-- A **Conditional GAN (cGAN)**
-- A **Conditional Diffusion Model**
+Train a class-conditional convolutional GAN and conditional U-Net diffusion
+models on MNIST, then evaluate generated digits using Inception FID, visual
+comparisons and synthetic-only downstream classification.
 
-Both models are trained on **MNIST** and evaluated using:
+## Run in your existing environment
 
-- **Frechet Inception Distance (FID)** - measures realism & diversity
-- **Downstream classifier accuracy** - how useful the synthetic data is for training a classifier
+From this project directory:
 
-This project is structured with **starter code with ToDos** in both python modules and notebooks.
-
-
-
-## Project Structure 
-```text 
-project /
-|-- data /
-    |-- dataloader.py
-|-- model /
-    |-- __init__.py
-    |-- cgan.py
-    |-- diffusion.py
-|-- training / 
-    | -- __init__.py
-    | -- train_cgan.py
-    | -- train_diffusion.py
-|-- utils /
-   |-- __init__.py
-   |-- checkpoint.py
-   |-- metrics.py
-   |-- visualize.py
-|-- 00_data_preparation.ipynb
-|-- 01_cGAN_training.ipynb
-|-- 02_diffusion_training.ipynb
-|-- 03_evaluation.ipynb
-|-- README.md
+```bash
+python -m pip install -r requirements.txt
+python -m pytest tests -q
+cd starter
+python -m jupyter notebook
 ```
 
+Run and save these notebooks **in order**:
 
-#### Data / 
+1. [00_data_preparation.ipynb](starter/00_data_preparation.ipynb): download MNIST,
+   normalize pixels to `[-1, 1]`, inspect images and save a CPU-portable sample.
+2. [01_cGAN_training.ipynb](starter/01_cGAN_training.ipynb): train the GAN for
+   50 epochs, display all ten digit classes and explore a fixed-label latent walk.
+3. [02_diffusion_training.ipynb](starter/02_diffusion_training.ipynb): visualize
+   forward noising; train separate linear and cosine models for 40 epochs each;
+   demonstrate full DDPM reverse sampling and faster DDIM.
+4. [03_evaluation.ipynb](starter/03_evaluation.ipynb): compute actual FID scores,
+   compare ten digit classes, train synthetic-only classifiers, report real
+   test accuracy, generate a four-digit composite, and plot FID versus sampling
+   steps.
 
-+ `dataloader.py` 
-   + Loads the MNIST Dataset
-   + Applies standard transform
-   + Helper functions to load data in notebooks 
+Use the same interpreter for the notebook kernel as for installed dependencies.
+No new virtual environment is required. Model code selects CUDA, then MPS,
+then CPU. CUDA uses float16 autocast with gradient scaling; CPU/MPS use float32.
+The diffusion training and sampling runs are substantial: a CUDA GPU is
+recommended. There are no background services or remote generation APIs.
 
-#### Model / 
-+ `cgan.py`
-   **Defines**: 
-   + **Generator(G)** - takes noise + class label and outputs a 28 x 28 image. 
-   + **Discriminator(D)** - takes image + class label and outputs real/fake probability 
+Diffusion training checks unscaled gradients before clipping. On a recoverable
+AMP overflow, GradScaler skips the optimizer update and lowers its scale;
+the EMA update is also skipped. Each event is logged, and epoch histories
+record `optimizer_steps` and `skipped_batches`. MSE includes all finite forward
+passes, including skipped batches. Non-finite loss, non-finite float32 gradients,
+eight consecutive overflows, or an epoch with no valid updates still fail
+explicitly rather than saving a misleading successful checkpoint. After
+updating the training module in a running notebook, restart the kernel and
+rerun its setup cells before training again.
 
+MNIST and the standard torch-fidelity Inception weights are downloaded on
+first use. Subsequent runs reuse their caches. Zero DataLoader workers is the
+reliable notebook default; enable workers explicitly only when beneficial.
+Worker mode uses spawn and a bounded prefetch queue.
 
-   - **Student ToDos**:
-        + Implement the label - conditioning logic in the G and D forward passes.
-        + Make sure image tensors are reshaped correctly on output/input
+## Architectures and objectives
 
-+ `diffusion.py`
-   **Defines**:
-   + `timestep_embedding` - converts diffusion step t into an embedding vector 
-   + `ResidualBlock` - convolutional block with time + label conditioning and residual connection
-   + `ConditionalUNet` - encoder-decoder UNet that predicts noise for a given noisy image, timestep, and label 
+- [cgan.py](starter/model/cgan.py): G concatenates a learned class embedding
+  with latent noise and upsamples from 7x7 to 28x28. Its final Tanh produces
+  `N x 1 x 28 x 28` images in `[-1, 1]`. D concatenates the image with a learned
+  spatial class map and returns **raw logits**.
+- [train_cgan.py](starter/training/train_cgan.py): a separate discriminator
+  step uses real and detached fake BCE, followed by a generator step using
+  non-saturating BCE against real targets. `BCEWithLogitsLoss` combines sigmoid
+  with BCE stably. This deliberately replaces the starter's sigmoid + BCELoss
+  convention; do not apply another sigmoid before the loss.
+- [diffusion.py](starter/model/diffusion.py): residual U-Net with GroupNorm,
+  configurable sinusoidal time embeddings, class embeddings at every block
+  and concatenated encoder/decoder skips. Output is an unrestricted noise
+  prediction with exactly the input shape.
+- [train_diffusion.py](starter/training/train_diffusion.py): construct
+  `x_t = sqrt(alpha_bar_t)*x_0 + sqrt(1-alpha_bar_t)*epsilon` and minimize MSE
+  between predicted and sampled epsilon. Training uses AdamW, gradient clipping
+  and an EMA model for sampling. Compare the scaled linear beta schedule and
+  cumulative cosine schedule at the same training horizon and budget.
 
-   - **Student ToDos**:
-        + Implement the UNet forward pass:
-            time embedding -> down path -> bottleneck -> up path -> output noise prediction
+Epoch-average histories are written to JSON after every epoch. GAN model
+checkpoints have distinct filenames; diffusion checkpoints include both raw
+and EMA weights, optimizer/scaler states, training schedule and architecture.
+Writes use temporary files and atomic replacement. Paths resolve from source
+locations, not the current working directory. Final files include:
 
-#### Training /
-+ `train_cgan.py`
-   Implements the adversarial training loop for the cGAN
+```text
+checkpoints/cgan_generator_epochfinal.pt
+checkpoints/cgan_discriminator_epochfinal.pt
+checkpoints/diffusion_linear_epochfinal.pt
+checkpoints/diffusion_cosine_epochfinal.pt
+```
 
+Load with [load_generator](starter/utils/generation.py), which reconstructs the
+architecture and applies EMA weights for diffusion. Sampling rejects any
+schedule/horizon mismatch. Old starter checkpoints are incompatible with the
+new convolutional GAN and do not contain sufficient schedule metadata: retrain
+them rather than trying to silently reuse them.
 
-   - **Student ToDos**:
-        + Complete the Generator update step (Sample noise/labels, generate images, compute generator loss, update weights)
-        + Complete the Discriminator update step (compute real vs fake loss, average, backprop)
-        + Add Checkpoint saving
+Full DDPM sampling traverses every training index in reverse with posterior
+variance and no final noise. DDIM uses a subset of those same indices.
+**Reducing sampling steps does not rebuild the training beta schedule.**
+By default evaluation uses 50 DDIM model calls with a trained horizon of 1000.
+Seeded CPU random generators make sampling reproducible without resetting the
+global RNG. GPU kernels can still introduce numerical nondeterminism.
 
-+ `train_diffusion.py`
-   **Defines**:
-   + `linear_beta_schedule` - builds a simple noise schedule 
-   + `sample_images` - runs the reverse diffusion process to sample from noise
-   + `train_diffusion` - trains the diffusion model via noise prediction
+## Evaluation protocol and leakage controls
 
-   - **Student ToDos**:
-       + In `train_diffusion`: Implement forward diffusion (add noise) and the MSE noise-prediction training step 
-       + In `sample_images`: Implement the reverse diffusion update loop to gradually denoise images
+- Generate 5,000 class-balanced samples per model for full, 2048-dimensional
+  **torch-fidelity Inception FID**, using the same sample count/seeds. Convert
+  normalized grayscale to RGB `[0, 1]`; Inception performs its standard
+  299x299 resize. Stream bounded batches and cache the real feature moments
+  once. Feature extraction remains float32; TorchMetrics accumulates float64
+  moments. FID runs on CPU or CUDA, not MPS.
+- Use a fixed balanced **MNIST train** reference for FID and selection.
+  Generators also train on MNIST train, so these are in-distribution metrics,
+  not evidence of held-out generative generalization. Inception features are
+  ImageNet-based and imperfect for digits. Small-sample FID is biased.
+- Compare all ten digit classes with identical fixed grayscale limits.
+  Condition labels are not predictions: manually verify recognizable digits.
+  Pixel standard deviation measures within-class variation but can be
+  inflated by noise; it is not a standalone meaningful-diversity metric.
+- Choose the diffusion schedule by reference FID, then generate **10,000 new
+  synthetic images per method** (independent seed) for downstream utility.
+  Train two fresh identical CNNs from scratch: one on cGAN outputs, one on
+  selected diffusion outputs. Neither CNN trains on real images or uses
+  pretrained weights. Report accuracy and per-digit accuracy on all **10,000
+  real MNIST test images**, once for each final classifier.
+- Use real-train reference classification accuracy, never real-test accuracy,
+  to select a CAPTCHA source separately for each digit. Selection reflects
+  synthetic-data utility, not necessarily maximum visual fidelity.
+- Plot FID at DDIM budgets 10, 25, 50 and 100 using the same initial noises,
+  reference images and sample counts. Reuse an already measured 50-step point.
+  This measures sampling steps K with training horizon T fixed, not a comparison
+  of independently retrained models at different T.
 
+Results, histories, checkpoint hashes, figures and the selection manifest are
+saved under `outputs/`. The notebook includes data-dependent Markdown analysis
+and explicitly distinguishes measured results from interpretation.
 
-#### Utils / 
-`checkpoint.py`: Helper functions to save and load model + optimizer states
-`metrics.py`:  Helper functions to calculate evaluation metrics
-`visualize.py`: Helper functions for plotting batches of Images and comparison grids
-   
+### Four-digit composition
 
-### Notebooks Overview 
-The noteboks are the main entry point for running the project. They use the modules above and contain additional **notebook-level ToDos** to wire piece together and interpret the results 
+After running the evaluation notebook, from `starter/`:
 
-+ `00_data_preparation.ipynb` - Downloads and loads MNIST data, visualizes sample digits 
-+ `01_cGAN_training.ipynb` - Imports `Generator`, `Discriminator` and ``train_cGAN``, sets up models, training loops for specified epocs and visualizes generated digits per class
-+ `02_diffusion_training.ipynb` - Imports `ConditionalUNet`, `train_diffusion`, and ``sample_images``, trains the difusion model and samples class-conditioned digits 
-+ `03_evaluation.ipynb` - Loads Real MNIST test set, synthetic samples from cGAN and Diffision, runs visual comparison (real vs cGAN vs Diffusion per class), FID computation between real vs synthetic, a simple CNN classifier trained on synthetic data and evaluated on real data 
+```bash
+python generate_captcha.py 0123 --output ../outputs/captcha_0123.png
+```
 
+The script loads `outputs/captcha_models.json`, reuses the selected models and
+preserves leading zeroes. This is a **CAPTCHA-style visual demo, not a secure
+human-verification system**. MNIST digits are easily recognized by OCR.
+Production bot defenses require independent security and accessibility work.
 
-## How to Work with the Starter Code 
+## Verification versus submission evidence
 
-+ Read the docstrings and comments first. 
-Each module explains its purpose and the role of the ToDos
+Automated tests cover conditioning and gradients, custom U-Net embedding sizes,
+skip shapes, exact forward equations, DDPM/DDIM oracle reconstruction, seeded
+sampling, metadata mismatch rejection, actual parameter updates, checkpoint
+round trips, synthetic-only classifier wiring, FID math/real-stat reuse,
+latent endpoints, visualization, notebook syntax and four-digit composition.
+Tests do not train models to convergence or establish human-visible fidelity.
 
-+ Complete the module-level ToDOs before training. 
-In order: 
-
-+ `model/cgan.py`
-+ `model/diffusion.py`
-+ `training/train_cgan.py`
-+ `training/train_diffusion.py`
-
-+ Then use the notebooks to run experiments and visualize results 
-
-
-## What You Should Aim to Understand 
-By the end of this project, you should be comfortable with 
-+ How **conditional GANS** and **conditional Diffusion** models generate images from noise + labels 
-+ How to implement basic training loops  for both models in PyTorch 
-+ How to:
-    - Visually inspect generative outputs
-    - Use **FID** as a realism/diversity metric
-
-Before coding, make sure all libraries are imported correctly, read through the objectives and ToDos, and keep brief notes on what you observe as you train and evaluate both models
+The notebooks intentionally contain **no fabricated training outputs, FID
+scores or accuracy claims**. To finish the empirical submission requirements,
+run full training and evaluation, visually confirm recognizable class-conditional
+digits, save all notebook outputs and include the generated checkpoints/results
+as required by your submission platform. Never present smoke-test measurements
+as trained-model performance. Generated data, checkpoints and outputs are
+git-ignored to avoid accidentally committing large artifacts.
