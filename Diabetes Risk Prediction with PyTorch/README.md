@@ -65,8 +65,8 @@ These instructions will help you set up your development environment and underst
 1. Clone this repository.
 
 ```sh
-git clone <repo-name>
-cd starter-kit
+git clone https://github.com/polarbeargo/Deep-Learning-Nanodegree-Program-Projects.git
+cd Deep-Learning-Nanodegree-Program-Projects/Diabetes Risk Prediction with PyTorch
 ```
 
 2. All dependencies for the project are collected in the `requirements.txt` file.  
@@ -74,15 +74,6 @@ cd starter-kit
 Install for your environment by running:
 ```sh
 pip install -r requirements.txt
-```
-
-Verify your installation by importing the key libraries:
-
-```python
-import torch
-import pandas as pd
-import sklearn
-print(f"PyTorch version: {torch.__version__}")
 ```
 
 ### Project Structure
@@ -170,14 +161,6 @@ The notebook is organized into 8 sections (~5-6 hours total):
 - ...
 
 Reflect on experiments and document findings.
-
----
-
-## Deliverables
-- [ ] Completed notebook with all code cells executed  
-- [ ] Implementation of all required improvement techniques  
-- [ ] At least 1–2 student-choice improvement techniques explored
-- [ ] Final reflection on experimental results 
 
 ---
 
